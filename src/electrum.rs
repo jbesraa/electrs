@@ -116,6 +116,39 @@ impl BroadcastArgs {
     }
 }
 
+/// Arguments for `blockchain.scripthash.get_history_paged`.
+///
+/// Untagged, like the other methods here that take optional arguments, so a client may
+/// send the scripthash alone and take the defaults. The cursor is nullable so that a first
+/// page can carry a limit: `[scripthash, null, 5]` reads as "the newest 5". Newest-first
+/// unless the last argument says otherwise, because that is the order a pager walks in.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PagedHistoryArgs {
+    Scripthash((ScriptHash,)),
+    ScripthashCursor((ScriptHash, Option<u32>)),
+    ScripthashCursorLimit((ScriptHash, Option<u32>, usize)),
+    ScripthashCursorLimitOrder((ScriptHash, Option<u32>, usize, bool)),
+}
+
+impl PagedHistoryArgs {
+    /// `(scripthash, cursor, limit, newest_first)`
+    fn parts(&self) -> (ScriptHash, Option<u32>, Option<usize>, Option<bool>) {
+        match self {
+            PagedHistoryArgs::Scripthash((scripthash,)) => (*scripthash, None, None, None),
+            PagedHistoryArgs::ScripthashCursor((scripthash, cursor)) => {
+                (*scripthash, *cursor, None, None)
+            }
+            PagedHistoryArgs::ScripthashCursorLimit((scripthash, cursor, limit)) => {
+                (*scripthash, *cursor, Some(*limit), None)
+            }
+            PagedHistoryArgs::ScripthashCursorLimitOrder((scripthash, cursor, limit, order)) => {
+                (*scripthash, *cursor, Some(*limit), Some(*order))
+            }
+        }
+    }
+}
+
 enum StandardError {
     ParseError,
     InvalidRequest,
@@ -312,6 +345,47 @@ impl Rpc {
             }
         };
         Ok(history_entries)
+    }
+
+    /// Default and maximum page size for `blockchain.scripthash.get_history_paged`.
+    ///
+    /// The cap is a safety property, not a preference: paging exists so that a request's
+    /// cost is bounded by `limit` rather than by the size of the address's history, and
+    /// that only holds if `limit` is itself bounded.
+    const PAGED_HISTORY_DEFAULT_LIMIT: usize = 100;
+    const PAGED_HISTORY_MAX_LIMIT: usize = 1_000;
+
+    /// A page of a script hash's history — an EXTENSION to the Electrum protocol.
+    ///
+    /// `blockchain.scripthash.get_history` returns the whole history or nothing, so for an
+    /// address with millions of transactions the only options are an enormous response or
+    /// (with `index_lookup_limit`) a flat refusal. This returns at most `limit` entries
+    /// from a cursor, newest first by default, plus the cursor to continue from. Cost is a
+    /// seek plus `limit` reads, so it does not grow with the history.
+    ///
+    /// Wallets do not know this method and cannot be affected by it; the standard
+    /// `blockchain.scripthash.get_history` keeps its behaviour exactly.
+    fn scripthash_get_history_paged(&self, args: &PagedHistoryArgs) -> Result<Value> {
+        let (scripthash, cursor, limit, newest_first) = args.parts();
+        let limit = limit
+            .unwrap_or(Self::PAGED_HISTORY_DEFAULT_LIMIT)
+            .clamp(1, Self::PAGED_HISTORY_MAX_LIMIT);
+        let page =
+            self.tracker
+                .history_page(&scripthash, cursor, limit, newest_first.unwrap_or(true))?;
+
+        Ok(json!({
+            "entries": page
+                .entries
+                .iter()
+                .map(|entry| json!({ "tx_hash": entry.txid, "height": entry.height }))
+                .collect::<Vec<_>>(),
+            // Opaque: hand it back to continue. Present whenever a page was returned.
+            "next_cursor": page.next_cursor,
+            // Whether the index holds candidates beyond the last one examined, so a caller
+            // can stop instead of asking for an empty page.
+            "more": page.more,
+        }))
     }
 
     fn scripthash_list_unspent(
@@ -608,6 +682,7 @@ impl Rpc {
                 Params::RelayFee => self.relayfee(),
                 Params::ScriptHashGetBalance(args) => self.scripthash_get_balance(client, args),
                 Params::ScriptHashGetHistory(args) => self.scripthash_get_history(client, args),
+                Params::ScriptHashGetHistoryPaged(args) => self.scripthash_get_history_paged(args),
                 Params::ScriptHashListUnspent(args) => self.scripthash_list_unspent(client, args),
                 Params::ScriptHashSubscribe(args) => self.scripthash_subscribe(client, args),
                 Params::ScriptHashUnsubscribe(args) => self.scripthash_unsubscribe(client, args),
@@ -642,6 +717,7 @@ enum Params {
     RelayFee,
     ScriptHashGetBalance((ScriptHash,)),
     ScriptHashGetHistory((ScriptHash,)),
+    ScriptHashGetHistoryPaged(PagedHistoryArgs),
     ScriptHashListUnspent((ScriptHash,)),
     ScriptHashSubscribe((ScriptHash,)),
     ScriptHashUnsubscribe((ScriptHash,)),
@@ -661,6 +737,9 @@ impl Params {
             "blockchain.relayfee" => Params::RelayFee,
             "blockchain.scripthash.get_balance" => Params::ScriptHashGetBalance(convert(params)?),
             "blockchain.scripthash.get_history" => Params::ScriptHashGetHistory(convert(params)?),
+            "blockchain.scripthash.get_history_paged" => {
+                Params::ScriptHashGetHistoryPaged(convert(params)?)
+            }
             "blockchain.scripthash.listunspent" => Params::ScriptHashListUnspent(convert(params)?),
             "blockchain.scripthash.subscribe" => Params::ScriptHashSubscribe(convert(params)?),
             "blockchain.scripthash.unsubscribe" => Params::ScriptHashUnsubscribe(convert(params)?),

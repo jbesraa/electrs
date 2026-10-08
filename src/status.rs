@@ -300,7 +300,11 @@ impl ScriptHashStatus {
 
     /// Get funding and spending entries from new blocks.
     /// Also cache relevant transactions and their merkle proofs.
-    fn sync_confirmed(&mut self, index: &IndexedChain) -> Result<HashSet<OutPoint>> {
+    fn sync_confirmed(
+        &mut self,
+        index: &IndexedChain,
+        lookup_limit: Option<usize>,
+    ) -> Result<HashSet<OutPoint>> {
         let headers = index.headers();
         let mut latest_header = None;
         // Drop entries from stale blocks
@@ -320,8 +324,25 @@ impl ScriptHashStatus {
         }
         // Recompute all funded outpoints
         let mut outpoints = self.confirmed_outpoints();
-        // Process transactions in chronological order
+        // Process transactions in chronological order.
+        //
+        // `lookup_limit` is enforced on the first entry PAST the limit, so the
+        // expensive part — reading and decoding every matching transaction, and
+        // caching its merkle proof — is never paid for an address that exceeds it.
+        // Refusing is the entire point: the alternative is materialising a
+        // multi-hundred-MB history that starves every other client on this port.
+        let mut seen = 0usize;
         for location in index.locations_by_scripthash(&self.scripthash, latest_header)? {
+            seen += 1;
+            if let Some(limit) = lookup_limit {
+                if seen > limit {
+                    anyhow::bail!(
+                        "index_lookup_limit: script hash history has more than {limit} \
+                         transactions; refusing to build it"
+                    );
+                }
+            }
+
             let tx_bytes = index.get_tx_bytes(&location)?;
             let tx = Transaction::consensus_decode_from_finite_reader(&mut &tx_bytes[..])?;
 
@@ -379,8 +400,13 @@ impl ScriptHashStatus {
 
     /// Sync with currently confirmed txs and mempool, downloading non-cached transactions via REST API.
     /// After a successful sync, script-hash status is updated.
-    pub(crate) fn sync(&mut self, index: &IndexedChain, mempool: &Mempool) -> Result<()> {
-        let outpoints = self.sync_confirmed(index)?;
+    pub(crate) fn sync(
+        &mut self,
+        index: &IndexedChain,
+        mempool: &Mempool,
+        lookup_limit: Option<usize>,
+    ) -> Result<()> {
+        let outpoints = self.sync_confirmed(index, lookup_limit)?;
         if !self.confirmed.is_empty() {
             debug!(
                 "{} transactions from {} blocks",

@@ -17,6 +17,14 @@ pub struct Tracker {
     index: IndexedChain,
     mempool: Mempool,
     ignore_mempool: bool,
+    /// Cap on how many confirmed history entries one script hash may have.
+    ///
+    /// 0.12.0 parses `index_lookup_limit` into `Config` and then reads it NOWHERE (the
+    /// name appears only in `config.rs`), so one address with a multi-million-entry
+    /// history walks the whole index — hundreds of MB of reads, ~1 GB RSS — and every
+    /// other client on this port starves until electrs is restarted. Threading the value
+    /// into the walk makes the flag do what its own help text promises.
+    lookup_limit: Option<usize>,
 }
 
 impl Tracker {
@@ -28,6 +36,7 @@ impl Tracker {
             index,
             mempool: Mempool::new(&metrics),
             ignore_mempool: config.ignore_mempool,
+            lookup_limit: config.index_lookup_limit,
         })
     }
 
@@ -60,7 +69,7 @@ impl Tracker {
 
     pub(crate) fn update_scripthash_status(&self, status: &mut ScriptHashStatus) -> Result<bool> {
         let prev_statushash = status.statushash();
-        status.sync(&self.index, &self.mempool)?;
+        status.sync(&self.index, &self.mempool, self.lookup_limit)?;
         Ok(prev_statushash != status.statushash())
     }
 

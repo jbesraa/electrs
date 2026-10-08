@@ -63,6 +63,20 @@ pub struct TxNum(u32);
 impl TxNum {
     const LEN: usize = std::mem::size_of::<Self>();
 
+    /// The largest representable position, i.e. "the end of the chain".
+    ///
+    /// Used as the start of a newest-first seek: iterating backwards from here yields
+    /// the most recent transaction of a script-hash range first.
+    pub const MAX: TxNum = TxNum(u32::MAX);
+
+    pub fn from_u32(value: u32) -> Self {
+        Self(value)
+    }
+
+    pub fn to_u32(self) -> u32 {
+        self.0
+    }
+
     pub fn offset_from(&self, base: TxNum) -> Option<u32> {
         self.0.checked_sub(base.0)
     }

@@ -10,7 +10,7 @@ mod db;
 mod headers;
 mod index;
 
-pub use chain::IndexedChain;
+pub use chain::{IndexedChain, ScriptHashPageEntry};
 pub use headers::Headers;
 pub use index::ScriptHash;
 

@@ -136,6 +136,16 @@ impl<'a> Builder<'a> {
     }
 }
 
+/// One transaction position that touched a script hash, and the block it is in.
+///
+/// `txnum` is the chronological position in the chain and doubles as the page cursor:
+/// callers treat it as opaque and hand it back to continue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScriptHashPageEntry {
+    pub txnum: u32,
+    pub block_height: usize,
+}
+
 impl IndexedChain {
     /// Open an existing DB, or create if missing.
     /// Use binary format REST API for fetching the data from bitcoind.
@@ -329,6 +339,46 @@ impl IndexedChain {
             .into_iter()
             // chain and store must be in sync
             .map(|txnum| self.headers.find_by_txnum(txnum)))
+    }
+
+    /// The location of a transaction by its position in the chain.
+    pub fn location_by_txnum(&self, txnum: u32) -> Location<'_> {
+        self.headers.find_by_txnum(index::TxNum::from_u32(txnum))
+    }
+
+    /// One page of a script hash's history, newest-first or oldest-first.
+    ///
+    /// `from` is a seek position — a `txnum`, opaque to callers, passed back as the
+    /// cursor to continue. `limit` bounds the index work, so a page's cost does not grow
+    /// with the size of the history, which is the whole point: `locations_by_scripthash`
+    /// collects every entry before the caller can use any of them.
+    ///
+    /// The index keys a script hash by its FIRST 8 BYTES only, so — exactly as with
+    /// `locations_by_scripthash` — callers must post-filter what they read; the paged
+    /// history in electrs does.
+    pub fn script_hash_page(
+        &self,
+        script_hash: &index::ScriptHash,
+        from: u32,
+        limit: usize,
+        newest_first: bool,
+    ) -> Result<Vec<ScriptHashPageEntry>, Error> {
+        let txnums = self.store.scan_by_script_hash_page(
+            script_hash,
+            index::TxNum::from_u32(from),
+            limit,
+            newest_first,
+        )?;
+        Ok(txnums
+            .into_iter()
+            .map(|txnum| {
+                let location = self.headers.find_by_txnum(txnum);
+                ScriptHashPageEntry {
+                    txnum: txnum.to_u32(),
+                    block_height: location.block_height(),
+                }
+            })
+            .collect())
     }
 
     /// Collect transactions' locations matching this txid.

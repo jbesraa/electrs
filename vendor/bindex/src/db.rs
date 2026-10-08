@@ -221,6 +221,50 @@ impl DB {
         Ok(txnums)
     }
 
+    /// Collect AT MOST `limit` `TxNum`s for a script hash, in either direction.
+    ///
+    /// The keys are `(prefix ‖ txnum)` with `txnum` big-endian, so lexicographic order is
+    /// chronological order and `from` is a seek rather than a walk. `newest_first`
+    /// iterates backwards from `from`, which reaches the most recent entries without
+    /// touching the older ones.
+    ///
+    /// `limit` is the point of this function: `scan_by_script_hash` collects EVERY
+    /// matching txnum before the caller can look at any of them, so for a script hash with
+    /// millions of transactions the cost is paid whether or not the caller uses them all.
+    /// Stopping inside the RocksDB iterator keeps a page's cost independent of the
+    /// history's size.
+    pub fn scan_by_script_hash_page(
+        &self,
+        script_hash: &index::ScriptHash,
+        from: index::TxNum,
+        limit: usize,
+        newest_first: bool,
+    ) -> Result<Vec<index::TxNum>, rocksdb::Error> {
+        let cf = self.cf(SCRIPT_HASH_CF);
+        let mut txnums = Vec::with_capacity(limit.min(1_024));
+
+        let hash_prefix = (*script_hash).into();
+        let start = index::HashPrefixRow::new(hash_prefix, from);
+        let direction = if newest_first {
+            rocksdb::Direction::Reverse
+        } else {
+            rocksdb::Direction::Forward
+        };
+        let mode = rocksdb::IteratorMode::From(start.key(), direction);
+        for kv in self.db.iterator_cf(cf, mode) {
+            let (key, _) = kv?;
+            if !key.starts_with(hash_prefix.as_bytes()) {
+                break;
+            }
+            let row = index::HashPrefixRow::from_bytes(key[..].try_into().unwrap());
+            txnums.push(row.txnum());
+            if txnums.len() >= limit {
+                break;
+            }
+        }
+        Ok(txnums)
+    }
+
     /// Collect a list of `TxNum`s for specified `txid`.
     pub fn scan_by_txid(&self, txid: &bitcoin::Txid) -> Result<Vec<index::TxNum>, rocksdb::Error> {
         let cf = self.cf(TXID_CF);

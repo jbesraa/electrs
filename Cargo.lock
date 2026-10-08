@@ -60,8 +60,6 @@ checksum = "d965446196e3b7decd44aa7ee49e31d630118f90ef12f97900f262eb915c951d"
 [[package]]
 name = "bindex"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "becb30e2688944707fe12c33fc1d6920fc4c83f67224cd81bf2767062b852f9e"
 dependencies = [
  "bitcoin",
  "bitcoin_slices",
